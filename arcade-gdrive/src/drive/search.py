@@ -3,7 +3,7 @@ Google Drive search operations.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from ..auth import execute_tool, ArcadeToolError
@@ -71,6 +71,10 @@ def search(
     max_results: int = 100,
     file_type: Optional[str] = None,
     parent_id: Optional[str] = None,
+    include_shared_drives: bool = False,
+    shared_drive_id: Optional[str] = None,
+    include_organization_domain_documents: bool = False,
+    order_by: Optional[str] = None,
 ) -> SearchResult:
     """Search for files and folders in Google Drive.
 
@@ -79,6 +83,10 @@ def search(
         max_results: Maximum number of results to return.
         file_type: Optional filter for file type (e.g., "folder", "document").
         parent_id: Optional parent folder ID to search within.
+        include_shared_drives: Include files from Shared Drives.
+        shared_drive_id: Limit search to a specific Shared Drive.
+        include_organization_domain_documents: Include organization domain documents.
+        order_by: Ordering for results (e.g., "name", "modifiedTime").
 
     Returns:
         SearchResult: The search results.
@@ -103,6 +111,18 @@ def search(
 
         if parent_id:
             params["folder_path_or_id"] = parent_id
+
+        if include_shared_drives:
+            params["include_shared_drives"] = True
+
+        if shared_drive_id:
+            params["shared_drive_id"] = shared_drive_id
+
+        if include_organization_domain_documents:
+            params["include_organization_domain_documents"] = True
+
+        if order_by:
+            params["order_by"] = order_by
 
         result = execute_tool("GoogleDrive.SearchFiles", **params)
 
@@ -292,3 +312,215 @@ def list_shared_drives() -> SearchResult:
             total_count=0,
             message=str(e),
         )
+
+
+@dataclass
+class TreeNode:
+    """Represents a node in the file/folder tree structure."""
+
+    id: str
+    name: str
+    mime_type: str
+    is_folder: bool
+    children: list["TreeNode"] = field(default_factory=list)
+
+
+@dataclass
+class TreeResult:
+    """Result of a get file tree structure operation."""
+
+    success: bool
+    root: Optional[TreeNode]
+    total_items: int
+    message: str
+
+
+@dataclass
+class UserInfo:
+    """Information about the authenticated user and Drive environment."""
+
+    success: bool
+    email: Optional[str]
+    name: Optional[str]
+    shared_drives: list[FileInfo]
+    raw_response: dict
+    message: str
+
+
+def get_file_tree_structure(
+    include_shared_drives: bool = False,
+    restrict_to_shared_drive_id: Optional[str] = None,
+    include_organization_domain_documents: bool = False,
+    order_by: Optional[str] = None,
+    limit: Optional[int] = 100,
+) -> TreeResult:
+    """Get the file/folder tree structure from Google Drive.
+
+    WARNING: This can be inefficient for large drives. Use the limit parameter
+    to restrict the number of items returned.
+
+    Args:
+        include_shared_drives: Include files from Shared Drives.
+        restrict_to_shared_drive_id: Limit to a specific Shared Drive.
+        include_organization_domain_documents: Include organization domain documents.
+        order_by: Ordering for results (e.g., "name", "modifiedTime").
+        limit: Maximum number of items to return (default 100).
+
+    Returns:
+        TreeResult: The file tree structure.
+    """
+    try:
+        # Build parameters for GoogleDrive.GetFileTreeStructure
+        params = {}
+
+        if include_shared_drives:
+            params["include_shared_drives"] = True
+
+        if restrict_to_shared_drive_id:
+            params["restrict_to_shared_drive_id"] = restrict_to_shared_drive_id
+
+        if include_organization_domain_documents:
+            params["include_organization_domain_documents"] = True
+
+        if order_by:
+            params["order_by"] = order_by
+
+        if limit:
+            params["limit"] = limit
+
+        result = execute_tool("GoogleDrive.GetFileTreeStructure", **params)
+
+        # Parse the tree structure from the response
+        def parse_node(data: dict) -> TreeNode:
+            """Recursively parse a node from the API response."""
+            children = []
+            children_data = data.get("children", [])
+            if isinstance(children_data, list):
+                children = [parse_node(c) for c in children_data if isinstance(c, dict)]
+
+            return TreeNode(
+                id=data.get("id", ""),
+                name=data.get("name", ""),
+                mime_type=data.get("mimeType", ""),
+                is_folder=data.get("mimeType") == "application/vnd.google-apps.folder",
+                children=children,
+            )
+
+        def count_nodes(node: TreeNode) -> int:
+            """Count total nodes in tree."""
+            return 1 + sum(count_nodes(c) for c in node.children)
+
+        # Handle various response formats
+        root_node = None
+        total_items = 0
+
+        if isinstance(result, dict):
+            root_node = parse_node(result)
+            total_items = count_nodes(root_node)
+        elif isinstance(result, list) and result:
+            # If result is a list, create a virtual root
+            children = [parse_node(item) for item in result if isinstance(item, dict)]
+            root_node = TreeNode(
+                id="root",
+                name="Root",
+                mime_type="application/vnd.google-apps.folder",
+                is_folder=True,
+                children=children,
+            )
+            total_items = count_nodes(root_node)
+
+        return TreeResult(
+            success=True,
+            root=root_node,
+            total_items=total_items,
+            message=f"Retrieved tree with {total_items} item(s)",
+        )
+
+    except ArcadeToolError as e:
+        logger.error(f"Get file tree structure failed: {e}")
+        return TreeResult(
+            success=False,
+            root=None,
+            total_items=0,
+            message=str(e),
+        )
+
+
+def get_user_info() -> UserInfo:
+    """Get full user profile and Drive environment information.
+
+    Returns:
+        UserInfo: Full user information including email, name, and shared drives.
+    """
+    try:
+        result = execute_tool("GoogleDrive.WhoAmI")
+
+        if not isinstance(result, dict):
+            return UserInfo(
+                success=False,
+                email=None,
+                name=None,
+                shared_drives=[],
+                raw_response={},
+                message=f"Unexpected response format: {type(result).__name__}",
+            )
+
+        # Extract shared drives
+        drives_data = result.get("sharedDrives", result.get("shared_drives", []))
+        shared_drives = []
+        for d in drives_data:
+            drive_id = d.get("id", "")
+            shared_drives.append(
+                FileInfo(
+                    id=drive_id,
+                    name=d.get("name", ""),
+                    mime_type="application/vnd.google-apps.folder",
+                    url=build_drive_url(drive_id, is_folder=True) if drive_id else "",
+                    is_folder=True,
+                )
+            )
+
+        return UserInfo(
+            success=True,
+            email=result.get("email", result.get("emailAddress")),
+            name=result.get("name", result.get("displayName")),
+            shared_drives=shared_drives,
+            raw_response=result,
+            message="User info retrieved successfully",
+        )
+
+    except ArcadeToolError as e:
+        logger.error(f"Get user info failed: {e}")
+        return UserInfo(
+            success=False,
+            email=None,
+            name=None,
+            shared_drives=[],
+            raw_response={},
+            message=str(e),
+        )
+
+
+def generate_file_picker_url() -> str:
+    """Generate a Google File Picker URL.
+
+    This URL allows users to select files from their Google Drive
+    and grant access to the application.
+
+    Returns:
+        str: The File Picker URL, or an error message if generation failed.
+    """
+    try:
+        result = execute_tool("GoogleDrive.GenerateGoogleFilePickerUrl")
+
+        if isinstance(result, str):
+            return result
+
+        if isinstance(result, dict):
+            return result.get("url", result.get("picker_url", str(result)))
+
+        return str(result)
+
+    except ArcadeToolError as e:
+        logger.error(f"Generate file picker URL failed: {e}")
+        return f"Error: {e}"

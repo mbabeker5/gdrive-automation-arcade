@@ -100,3 +100,7 @@ def load_dotenv_if_exists() -> bool:
         return False
     except ImportError:
         return False
+
+
+# Auto-load .env file when module is imported
+load_dotenv_if_exists()

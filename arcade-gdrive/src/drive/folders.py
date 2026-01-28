@@ -26,6 +26,7 @@ def create_folder(
     name: str,
     parent_id: Optional[str] = None,
     description: Optional[str] = None,
+    shared_drive_id: Optional[str] = None,
 ) -> FolderResult:
     """Create a new folder in Google Drive.
 
@@ -33,6 +34,7 @@ def create_folder(
         name: Name for the new folder.
         parent_id: Optional parent folder ID. If not provided, creates in root.
         description: Optional description for the folder.
+        shared_drive_id: Optional Shared Drive ID if creating in a Shared Drive.
 
     Returns:
         FolderResult: Result containing folder ID and URL if successful.
@@ -64,6 +66,8 @@ def create_folder(
         params = {"folder_name": name}
         if parent_id:
             params["parent_folder_path_or_id"] = parent_id
+        if shared_drive_id:
+            params["shared_drive_id"] = shared_drive_id
 
         result = execute_tool("GoogleDrive.CreateFolder", **params)
 
@@ -176,6 +180,7 @@ def move_to_folder(
     file_id: str,
     new_parent_id: str,
     remove_from_current: bool = True,
+    new_filename: Optional[str] = None,
 ) -> FolderResult:
     """Move a file or folder to a new parent folder.
 
@@ -183,6 +188,7 @@ def move_to_folder(
         file_id: ID of the file or folder to move.
         new_parent_id: ID of the destination folder.
         remove_from_current: If True, remove from current parent(s).
+        new_filename: Optional new name for the file after moving (rename while moving).
 
     Returns:
         FolderResult: Result of the operation.
@@ -204,6 +210,9 @@ def move_to_folder(
             "source_file_path_or_id": file_id,
             "destination_folder_path_or_id": new_parent_id,
         }
+
+        if new_filename:
+            params["new_filename"] = new_filename
 
         result = execute_tool("GoogleDrive.MoveFile", **params)
 

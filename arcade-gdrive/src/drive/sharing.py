@@ -40,6 +40,7 @@ def share_with_users(
     emails: list[str],
     role: str = "reader",
     send_notification: bool = True,
+    message: Optional[str] = None,
 ) -> ShareResult:
     """Share a file or folder with one or more users.
 
@@ -48,6 +49,7 @@ def share_with_users(
         emails: List of email addresses to share with.
         role: Permission role - "reader", "writer", or "commenter".
         send_notification: Whether to send email notifications.
+        message: Optional custom message to include in the notification email.
 
     Returns:
         ShareResult: Result of the sharing operation.
@@ -85,13 +87,16 @@ def share_with_users(
 
         try:
             # GoogleDrive.ShareFile uses file_path_or_id, email_addresses (list), role, send_notification_email
-            execute_tool(
-                "GoogleDrive.ShareFile",
-                file_path_or_id=file_id,
-                email_addresses=[email],
-                role=role,
-                send_notification_email=send_notification,
-            )
+            params = {
+                "file_path_or_id": file_id,
+                "email_addresses": [email],
+                "role": role,
+                "send_notification_email": send_notification,
+            }
+            if message:
+                params["message"] = message
+
+            execute_tool("GoogleDrive.ShareFile", **params)
             shared_with.append(email)
             logger.debug(f"Shared with {email}")
 

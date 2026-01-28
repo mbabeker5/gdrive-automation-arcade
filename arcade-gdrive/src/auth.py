@@ -139,7 +139,7 @@ def execute_tool(tool_name: str, **kwargs: Any) -> dict[str, Any]:
         response = client.tools.execute(
             tool_name=tool_name,
             user_id=config.arcade_user_id,
-            inputs=kwargs,
+            input=kwargs,
         )
 
         if not response.output:
