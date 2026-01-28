@@ -117,6 +117,7 @@ def get_credentials(force_refresh: bool = False) -> Credentials:
     token_path = _get_token_path()
 
     # Try to load from environment variable first (for deployment)
+    # Supports both GOOGLE_TOKEN_JSON (full JSON) and Streamlit secrets format
     token_json = os.getenv("GOOGLE_TOKEN_JSON")
     if token_json and not force_refresh:
         try:
@@ -127,6 +128,25 @@ def get_credentials(force_refresh: bool = False) -> Credentials:
         except Exception as e:
             logger.warning(f"Could not load credentials from env var: {e}")
             _credentials = None
+
+    # Try Streamlit secrets format (for Streamlit Community Cloud)
+    if _credentials is None and not force_refresh:
+        try:
+            import streamlit as st
+            if hasattr(st, 'secrets') and 'google' in st.secrets:
+                google_secrets = st.secrets['google']
+                token_data = {
+                    "token": google_secrets.get("token", ""),
+                    "refresh_token": google_secrets.get("refresh_token", ""),
+                    "token_uri": google_secrets.get("token_uri", "https://oauth2.googleapis.com/token"),
+                    "client_id": google_secrets.get("client_id", ""),
+                    "client_secret": google_secrets.get("client_secret", ""),
+                    "scopes": list(google_secrets.get("scopes", SCOPES)),
+                }
+                _credentials = Credentials.from_authorized_user_info(token_data, SCOPES)
+                logger.debug("Loaded credentials from Streamlit secrets")
+        except Exception as e:
+            logger.debug(f"Streamlit secrets not available: {e}")
 
     # Try to load saved credentials from file
     if _credentials is None and token_path.exists() and not force_refresh:
