@@ -126,13 +126,17 @@ def check_password():
     """Returns True if the user has entered the correct password."""
 
     def password_entered():
-        if st.session_state["password"] == st.secrets.get("APP_PASSWORD", ""):
+        if st.session_state["password"] == app_password:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
 
-    if st.secrets.get("APP_PASSWORD"):
+    try:
+        app_password = st.secrets["APP_PASSWORD"]
+    except (KeyError, FileNotFoundError, Exception):
+        app_password = None
+    if app_password:
         if st.session_state.get("password_correct", False):
             return True
 
