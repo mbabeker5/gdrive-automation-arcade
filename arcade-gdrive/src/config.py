@@ -10,10 +10,10 @@ from typing import Optional
 
 @dataclass
 class Config:
-    """Configuration for Arcade Google Drive operations."""
+    """Configuration for Google Drive operations."""
 
-    arcade_api_key: str
-    arcade_user_id: str
+    google_credentials_file: str
+    google_token_file: str
     default_parent_folder_id: Optional[str] = None
     default_shared_drive_id: Optional[str] = None
 
@@ -21,27 +21,12 @@ class Config:
     def from_env(cls) -> "Config":
         """Load configuration from environment variables.
 
-        Raises:
-            ValueError: If required environment variables are missing.
+        Returns:
+            Config: Configuration instance.
         """
-        api_key = os.getenv("ARCADE_API_KEY")
-        user_id = os.getenv("ARCADE_USER_ID")
-
-        if not api_key:
-            raise ValueError(
-                "ARCADE_API_KEY environment variable is required. "
-                "Get your API key from https://arcade.dev"
-            )
-
-        if not user_id:
-            raise ValueError(
-                "ARCADE_USER_ID environment variable is required. "
-                "This should be your email address."
-            )
-
         return cls(
-            arcade_api_key=api_key,
-            arcade_user_id=user_id,
+            google_credentials_file=os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json"),
+            google_token_file=os.getenv("GOOGLE_TOKEN_FILE", "token.json"),
             default_parent_folder_id=os.getenv("DEFAULT_PARENT_FOLDER_ID"),
             default_shared_drive_id=os.getenv("DEFAULT_SHARED_DRIVE_ID"),
         )
@@ -59,9 +44,6 @@ def get_config() -> Config:
 
     Returns:
         Config: The configuration instance.
-
-    Raises:
-        ValueError: If required environment variables are missing.
     """
     global _config
     if _config is None:

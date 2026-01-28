@@ -1,179 +1,303 @@
 """
-Arcade client management with singleton pattern and authorization caching.
+Google Drive authentication using direct OAuth 2.0.
+
+This module provides authentication for Google Drive API using standard
+Google OAuth 2.0 flow, providing full Drive access (not just app-created files).
 """
 
 import logging
-from typing import Any, Optional
+import os
+from pathlib import Path
+from typing import Optional
 
-from arcadepy import Arcade
-
-from .config import get_config
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build, Resource
 
 logger = logging.getLogger(__name__)
 
-# Singleton client instance
-_client: Optional[Arcade] = None
+# Scopes required for full Drive access
+SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive.metadata.readonly",
+]
 
-# Cache of tools that have been authorized for the current session
-_authorized_tools: set[str] = set()
+# Singleton instances
+_credentials: Optional[Credentials] = None
+_service: Optional[Resource] = None
 
 
-class ArcadeAuthError(Exception):
-    """Raised when Arcade authorization fails."""
-
+class GoogleAuthError(Exception):
+    """Raised when Google authentication fails."""
     pass
 
 
-class ArcadeToolError(Exception):
-    """Raised when a tool execution fails."""
-
+class GoogleAPIError(Exception):
+    """Raised when a Google API operation fails."""
     pass
 
 
-def get_arcade_client() -> Arcade:
-    """Get the singleton Arcade client instance.
-
-    Creates a new client on first call, reuses it on subsequent calls.
-    This avoids creating multiple client instances which is inefficient.
+def _get_credentials_path() -> Optional[Path]:
+    """Get the path to the OAuth credentials file.
 
     Returns:
-        Arcade: The Arcade client instance.
+        Path to credentials.json file, or None if using env var credentials.
 
     Raises:
-        ValueError: If API key is not configured.
+        GoogleAuthError: If credentials file is not found and no env var set.
     """
-    global _client
-    if _client is None:
-        config = get_config()
-        _client = Arcade(api_key=config.arcade_api_key)
-        logger.debug("Created new Arcade client instance")
-    return _client
+    # Check if credentials are provided via environment variable (for deployment)
+    if os.getenv("GOOGLE_CREDENTIALS_JSON"):
+        return None  # Signal to use env var instead of file
+
+    # Check environment variable for file path
+    creds_path = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+
+    # Try multiple locations
+    locations = [
+        Path(creds_path),
+        Path(__file__).parent.parent / creds_path,
+        Path(__file__).parent.parent / "credentials.json",
+        Path.home() / ".config" / "gdrive-automation" / "credentials.json",
+    ]
+
+    for loc in locations:
+        if loc.exists():
+            return loc
+
+    raise GoogleAuthError(
+        f"OAuth credentials file not found. Tried: {[str(l) for l in locations]}. "
+        "Please download credentials.json from Google Cloud Console or set GOOGLE_CREDENTIALS_JSON env var."
+    )
 
 
-def reset_client() -> None:
-    """Reset the singleton client and authorization cache.
+def _get_token_path() -> Path:
+    """Get the path to store/load the OAuth token.
 
-    Useful for testing or when credentials change.
+    Returns:
+        Path to token.json file.
     """
-    global _client, _authorized_tools
-    _client = None
-    _authorized_tools.clear()
-    logger.debug("Reset Arcade client and authorization cache")
+    # Check environment variable first
+    token_path = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+
+    # Default to project root
+    default_path = Path(__file__).parent.parent / token_path
+
+    # If env var is an absolute path, use it
+    if Path(token_path).is_absolute():
+        return Path(token_path)
+
+    return default_path
 
 
-def authorize_tool(tool_name: str) -> None:
-    """Authorize a tool if not already authorized.
+def get_credentials(force_refresh: bool = False) -> Credentials:
+    """Get valid Google OAuth credentials.
 
-    Uses a cache to avoid redundant authorization API calls.
+    Uses cached credentials if available and valid. Otherwise, attempts
+    to refresh or initiates the OAuth flow.
+
+    Supports deployment via environment variables:
+    - GOOGLE_TOKEN_JSON: JSON string of the token (from token.json content)
 
     Args:
-        tool_name: The name of the tool to authorize (e.g., "Google.ListFiles").
+        force_refresh: If True, ignore cached credentials and re-authenticate.
+
+    Returns:
+        Credentials: Valid Google OAuth credentials.
 
     Raises:
-        ArcadeAuthError: If authorization fails.
+        GoogleAuthError: If authentication fails.
     """
-    global _authorized_tools
+    global _credentials
 
-    if tool_name in _authorized_tools:
-        logger.debug(f"Tool {tool_name} already authorized (cached)")
-        return
+    if _credentials is not None and _credentials.valid and not force_refresh:
+        return _credentials
 
-    client = get_arcade_client()
-    config = get_config()
+    token_path = _get_token_path()
 
-    try:
-        auth_response = client.tools.authorize(
-            tool_name=tool_name,
-            user_id=config.arcade_user_id,
-        )
+    # Try to load from environment variable first (for deployment)
+    token_json = os.getenv("GOOGLE_TOKEN_JSON")
+    if token_json and not force_refresh:
+        try:
+            import json
+            token_data = json.loads(token_json)
+            _credentials = Credentials.from_authorized_user_info(token_data, SCOPES)
+            logger.debug("Loaded credentials from GOOGLE_TOKEN_JSON env var")
+        except Exception as e:
+            logger.warning(f"Could not load credentials from env var: {e}")
+            _credentials = None
 
-        if auth_response.status != "completed":
-            # Check for authorization URL in various attributes
-            auth_url = getattr(auth_response, "authorization_url", None) or getattr(auth_response, "url", None)
-            if auth_url:
-                print(f"\n🔐 Authorization required for {tool_name}")
-                print(f"   Please visit: {auth_url}")
-                print("   Waiting for authorization...\n")
-                # Wait for authorization to complete
-                client.auth.wait_for_completion(auth_response)
-                _authorized_tools.add(tool_name)
-                print(f"   ✓ Authorization complete for {tool_name}!\n")
-                return
-            raise ArcadeAuthError(
-                f"Authorization failed for {tool_name}. Status: {auth_response.status}"
+    # Try to load saved credentials from file
+    if _credentials is None and token_path.exists() and not force_refresh:
+        try:
+            _credentials = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            logger.debug(f"Loaded credentials from {token_path}")
+        except Exception as e:
+            logger.warning(f"Could not load saved credentials: {e}")
+            _credentials = None
+
+    # Refresh if credentials exist but are expired
+    if _credentials and _credentials.expired and _credentials.refresh_token:
+        try:
+            logger.info("Refreshing expired credentials...")
+            _credentials.refresh(Request())
+            # Only save to file if not using env var
+            if not token_json:
+                _save_credentials(_credentials, token_path)
+            logger.info("Credentials refreshed successfully")
+            return _credentials
+        except Exception as e:
+            logger.warning(f"Could not refresh credentials: {e}")
+            _credentials = None
+
+    # If no valid credentials, run the OAuth flow (only works locally)
+    if not _credentials or not _credentials.valid:
+        if os.getenv("GOOGLE_TOKEN_JSON"):
+            raise GoogleAuthError(
+                "Token from GOOGLE_TOKEN_JSON is invalid or expired. "
+                "Please re-authenticate locally and update the env var."
             )
+        _credentials = _run_oauth_flow()
+        _save_credentials(_credentials, token_path)
 
-        _authorized_tools.add(tool_name)
-        logger.debug(f"Successfully authorized tool: {tool_name}")
-
-    except ArcadeAuthError:
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error authorizing {tool_name}: {e}")
-        raise ArcadeAuthError(f"Failed to authorize {tool_name}: {e}") from e
+    return _credentials
 
 
-def execute_tool(tool_name: str, **kwargs: Any) -> dict[str, Any]:
-    """Execute an Arcade tool with automatic authorization.
+def _run_oauth_flow() -> Credentials:
+    """Run the OAuth 2.0 authorization flow.
 
-    Authorizes the tool if needed (using cache), then executes it.
-
-    Args:
-        tool_name: The name of the tool to execute.
-        **kwargs: Arguments to pass to the tool.
+    Opens a browser for the user to authorize the application.
 
     Returns:
-        dict: The tool execution result.
+        Credentials: New OAuth credentials.
 
     Raises:
-        ArcadeAuthError: If authorization fails.
-        ArcadeToolError: If tool execution fails.
+        GoogleAuthError: If the OAuth flow fails.
     """
-    # Ensure tool is authorized (uses cache)
-    authorize_tool(tool_name)
-
-    client = get_arcade_client()
-    config = get_config()
-
     try:
-        response = client.tools.execute(
-            tool_name=tool_name,
-            user_id=config.arcade_user_id,
-            input=kwargs,
+        credentials_path = _get_credentials_path()
+        logger.info(f"Starting OAuth flow with credentials from {credentials_path}")
+
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(credentials_path),
+            SCOPES,
         )
 
-        if not response.output:
-            raise ArcadeToolError(f"Tool {tool_name} returned no output")
+        # Run local server for OAuth callback
+        credentials = flow.run_local_server(
+            port=0,  # Use any available port
+            prompt="consent",  # Always show consent screen
+            authorization_prompt_message="Please authorize access to Google Drive in your browser.",
+        )
 
-        result = response.output.value
-        if result is None:
-            raise ArcadeToolError(f"Tool {tool_name} returned None value")
+        logger.info("OAuth flow completed successfully")
+        return credentials
 
-        return result
-
-    except (ArcadeAuthError, ArcadeToolError):
-        raise
     except Exception as e:
-        logger.error(f"Unexpected error executing {tool_name}: {e}")
-        raise ArcadeToolError(f"Failed to execute {tool_name}: {e}") from e
+        raise GoogleAuthError(f"OAuth flow failed: {e}") from e
 
 
-def get_authorized_tools() -> set[str]:
-    """Get the set of currently authorized tools.
-
-    Returns:
-        set[str]: Set of tool names that have been authorized.
-    """
-    return _authorized_tools.copy()
-
-
-def is_tool_authorized(tool_name: str) -> bool:
-    """Check if a tool has been authorized.
+def _save_credentials(credentials: Credentials, token_path: Path) -> None:
+    """Save credentials to a file for reuse.
 
     Args:
-        tool_name: The name of the tool to check.
+        credentials: Credentials to save.
+        token_path: Path to save the credentials.
+    """
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(token_path, "w") as f:
+            f.write(credentials.to_json())
+        logger.debug(f"Saved credentials to {token_path}")
+    except Exception as e:
+        logger.warning(f"Could not save credentials: {e}")
+
+
+def get_drive_service(force_refresh: bool = False) -> Resource:
+    """Get an authenticated Google Drive API service.
+
+    Uses a singleton pattern to reuse the service instance.
+
+    Args:
+        force_refresh: If True, create a new service instance.
 
     Returns:
-        bool: True if the tool is in the authorization cache.
+        Resource: Google Drive API service.
+
+    Raises:
+        GoogleAuthError: If authentication fails.
     """
-    return tool_name in _authorized_tools
+    global _service
+
+    if _service is not None and not force_refresh:
+        return _service
+
+    credentials = get_credentials(force_refresh=force_refresh)
+    _service = build("drive", "v3", credentials=credentials)
+    logger.debug("Created Drive API service")
+
+    return _service
+
+
+def reset_auth() -> None:
+    """Reset cached credentials and service.
+
+    Use this when you need to force re-authentication.
+    """
+    global _credentials, _service
+    _credentials = None
+    _service = None
+    logger.debug("Reset authentication state")
+
+
+def delete_token() -> bool:
+    """Delete the stored token file to force re-authentication.
+
+    Returns:
+        bool: True if token was deleted, False if it didn't exist.
+    """
+    token_path = _get_token_path()
+    if token_path.exists():
+        token_path.unlink()
+        reset_auth()
+        logger.info(f"Deleted token file: {token_path}")
+        return True
+    return False
+
+
+def get_user_email() -> Optional[str]:
+    """Get the email address of the authenticated user.
+
+    Returns:
+        str: User's email address, or None if not available.
+    """
+    try:
+        service = get_drive_service()
+        about = service.about().get(fields="user").execute()
+        return about.get("user", {}).get("emailAddress")
+    except Exception as e:
+        logger.warning(f"Could not get user email: {e}")
+        return None
+
+
+def is_authenticated() -> bool:
+    """Check if valid credentials exist.
+
+    Returns:
+        bool: True if authenticated with valid credentials.
+    """
+    global _credentials
+
+    if _credentials and _credentials.valid:
+        return True
+
+    token_path = _get_token_path()
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            return creds.valid or (creds.expired and creds.refresh_token)
+        except Exception:
+            pass
+
+    return False

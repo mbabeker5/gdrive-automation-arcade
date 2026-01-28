@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from ..auth import execute_tool, ArcadeToolError
+from ..auth import get_drive_service, GoogleAuthError
 from .utils import build_drive_url, validate_folder_name, validate_file_id
 
 logger = logging.getLogger(__name__)
@@ -62,24 +62,26 @@ def create_folder(
             )
 
     try:
-        # Build parameters - GoogleDrive.CreateFolder uses folder_name and parent_folder_path_or_id
-        params = {"folder_name": name}
+        service = get_drive_service()
+
+        # Build file metadata
+        file_metadata = {
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+        }
+
         if parent_id:
-            params["parent_folder_path_or_id"] = parent_id
-        if shared_drive_id:
-            params["shared_drive_id"] = shared_drive_id
+            file_metadata["parents"] = [parent_id]
 
-        result = execute_tool("GoogleDrive.CreateFolder", **params)
+        if description:
+            file_metadata["description"] = description
 
-        # Validate response format before returning success
-        if not isinstance(result, dict):
-            logger.error(f"Unexpected response type: {type(result)}")
-            return FolderResult(
-                success=False,
-                folder_id=None,
-                folder_url=None,
-                message=f"Unexpected response format: expected dict, got {type(result).__name__}",
-            )
+        # Create the folder
+        result = service.files().create(
+            body=file_metadata,
+            supportsAllDrives=True,
+            fields="id, name, webViewLink"
+        ).execute()
 
         folder_id = result.get("id")
 
@@ -102,7 +104,15 @@ def create_folder(
             message=f"Created folder '{name}'",
         )
 
-    except ArcadeToolError as e:
+    except GoogleAuthError as e:
+        logger.error(f"Create folder failed: {e}")
+        return FolderResult(
+            success=False,
+            folder_id=None,
+            folder_url=None,
+            message=str(e),
+        )
+    except Exception as e:
         logger.error(f"Create folder failed: {e}")
         return FolderResult(
             success=False,
@@ -205,24 +215,31 @@ def move_to_folder(
         )
 
     try:
-        # GoogleDrive.MoveFile uses source_file_path_or_id and destination_folder_path_or_id
-        params = {
-            "source_file_path_or_id": file_id,
-            "destination_folder_path_or_id": new_parent_id,
-        }
+        service = get_drive_service()
 
+        # Get current parents
+        file_info = service.files().get(
+            fileId=file_id,
+            fields="parents",
+            supportsAllDrives=True,
+        ).execute()
+
+        current_parents = ",".join(file_info.get("parents", []))
+
+        # Build update body
+        body = {}
         if new_filename:
-            params["new_filename"] = new_filename
+            body["name"] = new_filename
 
-        result = execute_tool("GoogleDrive.MoveFile", **params)
-
-        if not isinstance(result, dict):
-            return FolderResult(
-                success=False,
-                folder_id=None,
-                folder_url=None,
-                message=f"Unexpected response format: {type(result).__name__}",
-            )
+        # Move the file
+        result = service.files().update(
+            fileId=file_id,
+            body=body if body else None,
+            addParents=new_parent_id,
+            removeParents=current_parents if remove_from_current else None,
+            supportsAllDrives=True,
+            fields="id, name, webViewLink"
+        ).execute()
 
         return FolderResult(
             success=True,
@@ -231,7 +248,15 @@ def move_to_folder(
             message=f"Moved item to folder {new_parent_id}",
         )
 
-    except ArcadeToolError as e:
+    except GoogleAuthError as e:
+        logger.error(f"Move to folder failed: {e}")
+        return FolderResult(
+            success=False,
+            folder_id=None,
+            folder_url=None,
+            message=str(e),
+        )
+    except Exception as e:
         logger.error(f"Move to folder failed: {e}")
         return FolderResult(
             success=False,

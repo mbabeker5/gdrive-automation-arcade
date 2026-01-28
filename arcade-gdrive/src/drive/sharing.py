@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ..auth import execute_tool, ArcadeToolError
+from ..auth import get_drive_service, GoogleAuthError
 from .folders import create_folder, FolderResult
 from .utils import build_drive_url, validate_file_id
 
@@ -80,27 +80,41 @@ def share_with_users(
     shared_with: list[str] = []
     failed_shares: list[str] = []
 
+    try:
+        service = get_drive_service()
+    except GoogleAuthError as e:
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )
+
     for email in emails:
         email = email.strip()
         if not email:
             continue
 
         try:
-            # GoogleDrive.ShareFile uses file_path_or_id, email_addresses (list), role, send_notification_email
-            params = {
-                "file_path_or_id": file_id,
-                "email_addresses": [email],
+            permission = {
+                "type": "user",
                 "role": role,
-                "send_notification_email": send_notification,
+                "emailAddress": email,
             }
-            if message:
-                params["message"] = message
 
-            execute_tool("GoogleDrive.ShareFile", **params)
+            kwargs = {
+                "fileId": file_id,
+                "body": permission,
+                "sendNotificationEmail": send_notification,
+                "supportsAllDrives": True,
+            }
+            if message and send_notification:
+                kwargs["emailMessage"] = message
+
+            service.permissions().create(**kwargs).execute()
+
             shared_with.append(email)
             logger.debug(f"Shared with {email}")
 
-        except ArcadeToolError as e:
+        except Exception as e:
             logger.error(f"Failed to share with {email}: {e}")
             failed_shares.append(email)
 
@@ -267,35 +281,124 @@ def create_folder_and_get_url(
 def get_sharing_permissions(file_id: str) -> ShareResult:
     """Get the current sharing permissions for a file or folder.
 
-    NOTE: This functionality is not currently available in Arcade's Google Drive toolkit.
-    This function will return an error message.
-
     Args:
         file_id: The ID of the file or folder.
 
     Returns:
-        ShareResult: Error result indicating feature not available.
+        ShareResult: Result containing list of users the file is shared with.
     """
-    return ShareResult(
-        success=False,
-        message="get_sharing_permissions is not available - Arcade does not provide a ListPermissions tool",
-    )
+    try:
+        file_id = validate_file_id(file_id)
+    except ValueError as e:
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )
+
+    try:
+        service = get_drive_service()
+
+        permissions = service.permissions().list(
+            fileId=file_id,
+            supportsAllDrives=True,
+            fields="permissions(id, type, role, emailAddress, displayName)",
+        ).execute()
+
+        shared_with = []
+        for perm in permissions.get("permissions", []):
+            email = perm.get("emailAddress")
+            if email:
+                shared_with.append(email)
+
+        return ShareResult(
+            success=True,
+            message=f"Found {len(shared_with)} permission(s)",
+            shared_with=shared_with,
+        )
+
+    except GoogleAuthError as e:
+        logger.error(f"Get sharing permissions failed: {e}")
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Get sharing permissions failed: {e}")
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )
 
 
 def remove_sharing(file_id: str, email: str) -> ShareResult:
     """Remove sharing permission for a specific user.
-
-    NOTE: This functionality is not currently available in Arcade's Google Drive toolkit.
-    This function will return an error message.
 
     Args:
         file_id: The ID of the file or folder.
         email: Email address of the user to remove.
 
     Returns:
-        ShareResult: Error result indicating feature not available.
+        ShareResult: Result of the removal operation.
     """
-    return ShareResult(
-        success=False,
-        message="remove_sharing is not available - Arcade does not provide a RemovePermission tool",
-    )
+    try:
+        file_id = validate_file_id(file_id)
+    except ValueError as e:
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )
+
+    if not email or not isinstance(email, str):
+        return ShareResult(
+            success=False,
+            message="email must be a non-empty string",
+        )
+
+    email = email.strip().lower()
+
+    try:
+        service = get_drive_service()
+
+        # First, find the permission ID for this email
+        permissions = service.permissions().list(
+            fileId=file_id,
+            supportsAllDrives=True,
+            fields="permissions(id, emailAddress)",
+        ).execute()
+
+        permission_id = None
+        for perm in permissions.get("permissions", []):
+            if perm.get("emailAddress", "").lower() == email:
+                permission_id = perm.get("id")
+                break
+
+        if not permission_id:
+            return ShareResult(
+                success=False,
+                message=f"No permission found for {email}",
+            )
+
+        # Remove the permission
+        service.permissions().delete(
+            fileId=file_id,
+            permissionId=permission_id,
+            supportsAllDrives=True,
+        ).execute()
+
+        return ShareResult(
+            success=True,
+            message=f"Removed permission for {email}",
+        )
+
+    except GoogleAuthError as e:
+        logger.error(f"Remove sharing failed: {e}")
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Remove sharing failed: {e}")
+        return ShareResult(
+            success=False,
+            message=str(e),
+        )

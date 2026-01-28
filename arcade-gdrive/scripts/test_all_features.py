@@ -226,7 +226,7 @@ def main():
     # Initialize client
     try:
         client = DriveClient()
-        print(f"Client initialized for user: {client.user_id}")
+        print("Client initialized successfully")
     except Exception as e:
         print(f"Failed to initialize client: {e}")
         sys.exit(1)

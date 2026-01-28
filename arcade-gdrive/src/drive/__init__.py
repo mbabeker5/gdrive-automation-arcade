@@ -2,7 +2,7 @@
 Google Drive operations module.
 
 Provides functions for searching, creating folders, sharing, and downloading
-files from Google Drive using Arcade.
+files from Google Drive using direct Google API.
 """
 
 from .download import download_file, download_to_memory, DownloadResult

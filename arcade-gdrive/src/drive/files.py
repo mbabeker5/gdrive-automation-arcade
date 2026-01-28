@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from ..auth import execute_tool, ArcadeToolError
+from ..auth import get_drive_service, GoogleAuthError
 from .utils import build_drive_url, validate_file_id
 
 logger = logging.getLogger(__name__)
@@ -77,26 +77,14 @@ def rename_file(
         )
 
     try:
-        # Build parameters for GoogleDrive.RenameFile
-        params = {
-            "file_path_or_id": file_id,
-            "new_filename": new_name,
-        }
+        service = get_drive_service()
 
-        if shared_drive_id:
-            params["shared_drive_id"] = shared_drive_id
-
-        result = execute_tool("GoogleDrive.RenameFile", **params)
-
-        # Validate response format
-        if not isinstance(result, dict):
-            logger.error(f"Unexpected response type: {type(result)}")
-            return FileResult(
-                success=False,
-                file_id=None,
-                file_url=None,
-                message=f"Unexpected response format: expected dict, got {type(result).__name__}",
-            )
+        result = service.files().update(
+            fileId=file_id,
+            body={"name": new_name},
+            supportsAllDrives=True,
+            fields="id, name, webViewLink"
+        ).execute()
 
         result_id = result.get("id", file_id)
         file_url = result.get("webViewLink") or build_drive_url(result_id, is_folder=False)
@@ -108,7 +96,15 @@ def rename_file(
             message=f"Renamed to '{new_name}'",
         )
 
-    except ArcadeToolError as e:
+    except GoogleAuthError as e:
+        logger.error(f"Rename file failed: {e}")
+        return FileResult(
+            success=False,
+            file_id=None,
+            file_url=None,
+            message=str(e),
+        )
+    except Exception as e:
         logger.error(f"Rename file failed: {e}")
         return FileResult(
             success=False,
@@ -126,6 +122,10 @@ def upload_file(
     shared_drive_id: Optional[str] = None,
 ) -> UploadResult:
     """Upload a file from a URL to Google Drive.
+
+    Note: This function requires the file content to be downloaded first.
+    For URL-based uploads, consider using the Google Drive API's
+    web content link feature or download the file locally first.
 
     Args:
         file_name: Name for the uploaded file.
@@ -189,33 +189,31 @@ def upload_file(
             )
 
     try:
-        # Build parameters for GoogleDrive.UploadFile
-        params = {
-            "file_name": file_name,
-            "source_url": source_url,
-        }
+        import urllib.request
+        from googleapiclient.http import MediaInMemoryUpload
 
-        if mime_type:
-            params["mime_type"] = mime_type
+        service = get_drive_service()
 
+        # Download the file content
+        with urllib.request.urlopen(source_url) as response:
+            content = response.read()
+            content_type = mime_type or response.headers.get("Content-Type", "application/octet-stream")
+
+        # Build file metadata
+        file_metadata = {"name": file_name}
         if destination_folder_id:
-            params["destination_folder_path_or_id"] = destination_folder_id
+            file_metadata["parents"] = [destination_folder_id]
 
-        if shared_drive_id:
-            params["shared_drive_id"] = shared_drive_id
+        # Create media upload
+        media = MediaInMemoryUpload(content, mimetype=content_type)
 
-        result = execute_tool("GoogleDrive.UploadFile", **params)
-
-        # Validate response format
-        if not isinstance(result, dict):
-            logger.error(f"Unexpected response type: {type(result)}")
-            return UploadResult(
-                success=False,
-                file_id=None,
-                file_url=None,
-                file_name=file_name,
-                message=f"Unexpected response format: expected dict, got {type(result).__name__}",
-            )
+        # Upload the file
+        result = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            supportsAllDrives=True,
+            fields="id, name, webViewLink"
+        ).execute()
 
         result_id = result.get("id")
         if not result_id:
@@ -239,12 +237,109 @@ def upload_file(
             message=f"Uploaded '{result_name}'",
         )
 
-    except ArcadeToolError as e:
+    except GoogleAuthError as e:
         logger.error(f"Upload file failed: {e}")
         return UploadResult(
             success=False,
             file_id=None,
             file_url=None,
             file_name=file_name,
+            message=str(e),
+        )
+    except Exception as e:
+        logger.error(f"Upload file failed: {e}")
+        return UploadResult(
+            success=False,
+            file_id=None,
+            file_url=None,
+            file_name=file_name,
+            message=str(e),
+        )
+
+
+def upload_local_file(
+    file_path: str,
+    file_name: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    destination_folder_id: Optional[str] = None,
+) -> UploadResult:
+    """Upload a local file to Google Drive.
+
+    Args:
+        file_path: Path to the local file.
+        file_name: Optional name for the uploaded file (defaults to filename).
+        mime_type: Optional MIME type for the file.
+        destination_folder_id: Optional destination folder ID.
+
+    Returns:
+        UploadResult: Result containing file ID, URL, and name if successful.
+    """
+    import os
+    from pathlib import Path
+    from googleapiclient.http import MediaFileUpload
+
+    file_path = Path(file_path)
+
+    if not file_path.exists():
+        return UploadResult(
+            success=False,
+            file_id=None,
+            file_url=None,
+            file_name=file_name or "",
+            message=f"File not found: {file_path}",
+        )
+
+    actual_name = file_name or file_path.name
+
+    try:
+        service = get_drive_service()
+
+        # Build file metadata
+        file_metadata = {"name": actual_name}
+        if destination_folder_id:
+            file_metadata["parents"] = [destination_folder_id]
+
+        # Create media upload
+        media = MediaFileUpload(
+            str(file_path),
+            mimetype=mime_type,
+            resumable=True
+        )
+
+        # Upload the file
+        result = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            supportsAllDrives=True,
+            fields="id, name, webViewLink"
+        ).execute()
+
+        result_id = result.get("id")
+        if not result_id:
+            return UploadResult(
+                success=False,
+                file_id=None,
+                file_url=None,
+                file_name=actual_name,
+                message="API response missing file ID",
+            )
+
+        file_url = result.get("webViewLink") or build_drive_url(result_id, is_folder=False)
+
+        return UploadResult(
+            success=True,
+            file_id=result_id,
+            file_url=file_url,
+            file_name=result.get("name", actual_name),
+            message=f"Uploaded '{actual_name}'",
+        )
+
+    except Exception as e:
+        logger.error(f"Upload local file failed: {e}")
+        return UploadResult(
+            success=False,
+            file_id=None,
+            file_url=None,
+            file_name=actual_name,
             message=str(e),
         )

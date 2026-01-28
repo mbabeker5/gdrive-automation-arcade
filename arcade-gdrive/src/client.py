@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import load_dotenv_if_exists, get_config
-from .auth import get_arcade_client, execute_tool, ArcadeToolError
+from .auth import get_drive_service, GoogleAuthError
 from .drive import (
     # Search
     search,
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 
 class DriveClient:
-    """High-level client for Google Drive operations via Arcade.
+    """High-level client for Google Drive operations.
 
     This class provides a convenient interface for common Drive operations
     including searching, creating folders, sharing, and downloading files.
@@ -106,12 +106,7 @@ class DriveClient:
 
         # Validate configuration is available
         self._config = get_config()
-        logger.debug(f"DriveClient initialized for user: {self._config.arcade_user_id}")
-
-    @property
-    def user_id(self) -> str:
-        """Get the configured Arcade user ID."""
-        return self._config.arcade_user_id
+        logger.debug("DriveClient initialized")
 
     # -------------------------------------------------------------------------
     # Search operations
@@ -386,11 +381,8 @@ class DriveClient:
         Returns:
             dict: User information including email and name.
         """
-        try:
-            result = execute_tool("GoogleDrive.WhoAmI")
-            return result if isinstance(result, dict) else {"raw": result}
-        except ArcadeToolError as e:
-            return {"error": str(e)}
+        from .drive.google_api import get_user_info as google_get_user_info
+        return google_get_user_info()
 
     def get_full_user_info(self) -> UserInfo:
         """Get full user profile and Drive environment information.

@@ -31,13 +31,13 @@ def _get_client() -> DriveClient:
 TOOL_DEFINITIONS = [
     {
         "name": "search_drive",
-        "description": "Search for files and folders by name across all drives including Shared Drives. Returns file IDs, names, types, and URLs.",
+        "description": "Search for files and folders by name across all drives including Shared Drives. Searches recursively through all subfolders. Returns file IDs, names, types, and URLs. To search within a specific folder, first find its ID using search or list_folder, then pass that ID as parent_id.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search term to find files/folders by name.",
+                    "description": "Search term to find files/folders by name (searches recursively through all subfolders).",
                 },
                 "file_type": {
                     "type": "string",
@@ -46,6 +46,10 @@ TOOL_DEFINITIONS = [
                 "max_results": {
                     "type": "integer",
                     "description": "Maximum number of results to return (default 50).",
+                },
+                "parent_id": {
+                    "type": "string",
+                    "description": "Optional folder ID to search within. If provided, only searches within this folder and its subfolders.",
                 },
             },
             "required": ["query"],
@@ -190,10 +194,12 @@ def execute_tool(name: str, args: dict) -> dict:
     client = _get_client()
 
     if name == "search_drive":
-        result = client.search_shared_drive(
+        from src.drive.google_api import search_all
+        result = search_all(
             args["query"],
             file_type=args.get("file_type"),
             max_results=args.get("max_results", 50),
+            parent_id=args.get("parent_id"),
         )
         return {
             "success": result.success,
@@ -215,24 +221,26 @@ def execute_tool(name: str, args: dict) -> dict:
     elif name == "create_folder":
         parent_id = args.get("parent_id")
         if parent_id:
+            # create_folder_shared_drive returns GoogleFolderResult (web_view_link, error)
             result = client.create_folder_shared_drive(
                 args["name"], parent_id=parent_id,
             )
             return {
                 "success": result.success,
                 "folder_id": result.folder_id,
-                "folder_name": result.folder_name,
+                "folder_name": result.folder_name or args["name"],
                 "web_view_link": result.web_view_link,
                 "error": result.error,
             }
         else:
+            # create_folder returns FolderResult (folder_url, message)
             result = client.create_folder(args["name"])
             return {
                 "success": result.success,
                 "folder_id": result.folder_id,
-                "folder_name": result.folder_name,
-                "web_view_link": result.web_view_link,
-                "error": getattr(result, "error", None),
+                "folder_name": args["name"],
+                "web_view_link": result.folder_url,
+                "message": result.message,
             }
 
     elif name == "rename_file":
@@ -240,19 +248,18 @@ def execute_tool(name: str, args: dict) -> dict:
         return {
             "success": result.success,
             "file_id": result.file_id,
-            "file_name": result.file_name,
-            "web_view_link": result.web_view_link,
-            "error": getattr(result, "error", None),
+            "file_name": args["new_name"],
+            "web_view_link": result.file_url,
+            "message": result.message,
         }
 
     elif name == "move_file":
         result = client.move(args["file_id"], args["new_parent_id"])
         return {
             "success": result.success,
-            "folder_id": result.folder_id,
-            "folder_name": result.folder_name,
-            "web_view_link": result.web_view_link,
-            "error": getattr(result, "error", None),
+            "file_id": result.folder_id,
+            "web_view_link": result.folder_url,
+            "message": result.message,
         }
 
     elif name == "share_file":
