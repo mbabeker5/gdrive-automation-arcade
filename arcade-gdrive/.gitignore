@@ -1,7 +1,9 @@
-# Environment
+# Environment and credentials
 .env
 .env.local
 .env.*.local
+credentials.json
+token.json
 
 # Python
 __pycache__/
