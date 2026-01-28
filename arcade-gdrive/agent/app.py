@@ -120,6 +120,34 @@ def process_response(client: Anthropic, response, messages: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="GDrive PM Assistant", page_icon="📁")
+
+# Simple password protection
+def check_password():
+    """Returns True if the user has entered the correct password."""
+
+    def password_entered():
+        if st.session_state["password"] == st.secrets.get("APP_PASSWORD", ""):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.secrets.get("APP_PASSWORD"):
+        if st.session_state.get("password_correct", False):
+            return True
+
+        st.title("📁 GDrive PM Assistant")
+        st.text_input("Password", type="password", on_change=password_entered, key="password")
+
+        if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+            st.error("Incorrect password")
+        return False
+
+    return True  # No password set, allow access
+
+if not check_password():
+    st.stop()
+
 st.title("📁 Google Drive PM Assistant")
 
 # Session state
